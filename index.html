@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>JARVIS</title>
+  <meta name="theme-color" content="#02040a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="data:application/manifest+json;base64,ewogICJuYW1lIjogIkpBUlZJUyIsCiAgInNob3J0X25hbWUiOiAiSkFSVklTIiwKICAic3RhcnRfdXJsIjogIi8iLAogICJkaXNwbGF5IjogInN0YW5kYWxvbmUiLAogICJiYWNrZ3JvdW5kX2NvbG9yIjogIiMwMjA0MGEiLAogICJ0aGVtZV9jb2xvciIjogIiMwMjA0MGEiLAogICJvcmllbnRhdGlvbiI6ICJwb3J0cmFpdCIKZX0=">
+  
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; overflow: hidden; -webkit-tap-highlight-color: transparent; }
+    body, html { width: 100%; height: 100%; background-color: #02040a; display: flex; justify-content: center; align-items: center; font-family: sans-serif; cursor: pointer; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+
+  <canvas id="jarvisCanvas"></canvas>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // -------------------------------------------------------------
+    // KOPYALADIĞIN API ANAHTARINI AŞAĞIDAKİ TIRNAKLARIN İÇİNE YAPIŞTIR
+    // -------------------------------------------------------------
+    const GROQ_API_KEY = "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"; 
+
+    // Service Worker Kaydı (PWA Yükleme Desteği)
+    if ('serviceWorker' in navigator) {
+      const swCode = `
+        self.addEventListener('install', (e) => self.skipWaiting());
+        self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+        self.addEventListener('fetch', (e) => e.respondWith(fetch(e.request)));
+      `;
+      const blob = new Blob([swCode], { type: 'text/javascript' });
+      navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(() => {});
+    }
+
+    // 1. Scene & Canvas Kurulumu
+    const canvas = document.getElementById('jarvisCanvas');
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    camera.position.z = 4.5;
+
+    // 2. 3D Hologram Küre
+    const particleCount = 2200;
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(particleCount * 3);
+    const radius = 1.6;
+
+    for (let i = 0; i < particleCount; i++) {
+      const u = Math.random();
+      const v = Math.random();
+      const theta = u * 2.0 * Math.PI;
+      const phi = Math.acos(2.0 * v - 1.0);
+      const r = radius + (Math.random() - 0.5) * 0.12;
+
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = r * Math.cos(phi);
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    const material = new THREE.PointsMaterial({
+      color: 0xff6600,
+      size: 0.032,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending
+    });
+    const sphere = new THREE.Points(geometry, material);
+    scene.add(sphere);
+
+    // Zıt Yönlerde Dönen Halkalar
+    const createRing = (r, color, opacity) => {
+      const ringGeo = new THREE.RingGeometry(r, r + 0.018, 64);
+      const ringMat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity, blending: THREE.AdditiveBlending });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      scene.add(ring);
+      return ring;
+    };
+    const innerRing = createRing(1.9, 0xff8c00, 0.5);
+    const outerRing = createRing(2.25, 0xff4500, 0.4);
+
+    // 3. Ses ve Yapay Zeka Motoru
+    let audioLevel = 1.0;
+    let recognition;
+    let synth = window.speechSynthesis;
+    let isListening = false;
+
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'tr-TR';
+
+      recognition.onstart = () => { isListening = true; };
+      recognition.onresult = async (event) => {
+        const userPrompt = event.results[event.results.length - 1][0].transcript;
+        if (userPrompt.trim().length > 0) {
+          const aiResponse = await askAI(userPrompt);
+          speakResponse(aiResponse);
+        }
+      };
+
+      recognition.onerror = () => { if (isListening) try { recognition.start(); } catch(e){} };
+      recognition.onend = () => { if (isListening) try { recognition.start(); } catch(e){} };
+    }
+
+    // Groq Yapay Zeka Baglantisi
+    async function askAI(prompt) {
+      if (!GROQ_API_KEY || GROQ_API_KEY.includes("BURAYA_KOPYALADIGIN")) {
+        return "Efendim, yapay zekâ anahtarı girilmediği için size cevap veremiyorum.";
+      }
+      try {
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "llama-3.3-70b-versatile",
+            messages: [
+              { role: "system", content: "Sen JARVIS'sin. Kullanıcıya kısa, karizmatik, doğrudan ve net Türkçe sesli yanıtlar ver. Cümlelerini sesli okunmaya uygun ve akıcı tut." },
+              { role: "user", content: prompt }
+            ],
+            max_tokens: 150
+          })
+        });
+        const data = await response.json();
+        return data.choices[0].message.content;
+      } catch (e) {
+        return "Sistemlerime erişirken bir hata oluştu efendim.";
+      }
+    }
+
+    // Derin Erkek Sesi
+    function speakResponse(text) {
+      if (synth.speaking) synth.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'tr-TR';
+      utterance.pitch = 0.70;
+      utterance.rate = 0.95;
+
+      const voices = synth.getVoices();
+      const trVoice = voices.find(v => v.lang.includes('tr') && (v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('erkek')));
+      if (trVoice) utterance.voice = trVoice;
+
+      utterance.onstart = () => { audioLevel = 1.7; };
+      utterance.onend = () => { audioLevel = 1.0; };
+      synth.speak(utterance);
+    }
+
+    // Dokunma ve Laf Kesme
+    window.addEventListener('click', () => {
+      if (synth.speaking) {
+        synth.cancel();
+      }
+      if (recognition && !isListening) {
+        try {
+          recognition.start();
+          isListening = true;
+        } catch(e){}
+      }
+    });
+
+    // 4. Animasyon
+    function animate() {
+      requestAnimationFrame(animate);
+      sphere.rotation.y += 0.004;
+      sphere.rotation.x += 0.002;
+      innerRing.rotation.z -= 0.003;
+      outerRing.rotation.z += 0.002;
+
+      const scale = 1 + Math.sin(Date.now() * 0.003) * 0.04 * audioLevel;
+      sphere.scale.set(scale, scale, scale);
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
